@@ -1,6 +1,6 @@
 </$objtype/mkfile
 
-BIN=/$objtype/mkfile
+BIN=/$objtype/bin
 TARG=vshot
 OFILES=vshot.$O
 HFILES=stb_image_resize.h
