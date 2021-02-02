@@ -1,0 +1,9 @@
+vshot: a visual screenshotter for plan9
+========================================
+
+Displays a carousel of all open windows as thumbnails.
+A menu is available through mouse 3 to take a screenshot of the currently
+shown window.
+
+Use left and right arrow keys to navigate between windows.
+Use q or del to quit.
