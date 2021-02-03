@@ -18,7 +18,8 @@ typedef struct Win Win;
 
 struct Win
 {
-	long id;
+	Channel *c;
+	int id;
 	char *label;
 	Memimage *image;
 	Image *thumbnail;
@@ -29,6 +30,7 @@ enum
 	Emouse,
 	Eresize,
 	Ekeyboard,
+	Eload,
 };
 
 enum { Mshot, Mexit };
@@ -37,11 +39,15 @@ Menu   menu = { menustr };
 
 Mousectl 	*mctl;
 Keyboardctl	*kctl;
+Channel		*loadc;
 Rectangle	winr;
 Rectangle	shotr;
+Image		*back;
+Image		*bord;
 int		loading;
 Win		**wins;
 int		nwins;
+int		nload;
 int		cur;
 
 void*
@@ -83,18 +89,32 @@ void
 redraw(void)
 {
 	Win *w;
-	Point p, tp;
-	Rectangle r;
+	Point sp, p, tp;
+	Rectangle r, pr;
+	int pc;
+	char *s;
 
 	draw(screen, screen->r, display->white, nil, ZP);
 	if(loading){
-		string(screen, addpt(screen->r.min, Pt(10, 10)), display->black, ZP, font, "Loading...");
+		p.x = (Dx(screen->r)-200)/2;
+		p.y = (Dy(screen->r)-25)/2;
+		r = rectaddpt(rectaddpt(Rect(0, 0, 200, 25), p), screen->r.min);
+		s = "Loading...";
+		sp.x = (Dx(screen->r)-stringwidth(font, s))/2;
+		sp.y = r.min.y - font->height - 12 - screen->r.min.y;
+		string(screen, addpt(screen->r.min, sp), display->black, ZP, font, "Loading...");
+		if(nwins>0 && nload>0){
+			pc = 200*((double)nload/nwins);
+			pr = rectaddpt(rectaddpt(Rect(0, 0, pc, 25), p), screen->r.min);
+			draw(screen, pr, back, nil, ZP);
+		}
+		border(screen, r, 2, bord, ZP);	
 		flushimage(display, 1);
 		return;
 	}
 	w = wins[cur];
 	p.x = screen->r.min.x + (Dx(winr)-stringwidth(font, w->label))/2;
-	p.y = screen->r.max.y - 4 - font->height;
+	p.y = screen->r.max.y - 12 - font->height;
 	string(screen, p, display->black, ZP, font, w->label);
 	tp.x = (Dx(screen->r)-Dx(w->thumbnail->r))/2;
 	tp.y = (Dy(screen->r)-Dy(w->thumbnail->r))/2;
@@ -183,7 +203,7 @@ scaledrect(Rectangle r)
 }		
 
 void
-loadwin(int id)
+loadthumbproc(void *arg)
 {
 	Win *w;
 	char *path;
@@ -194,14 +214,8 @@ loadwin(int id)
 	int iw, ih, ow, oh;
 	int fd, n;
 
-	w = emalloc(sizeof *w);
-	w->id = id;
-	path = smprint("/dev/wsys/%d/label", id);
-	w->label = readstr(path);
-	free(path);
-	if(w->label==nil)
-		sysfatal("unable to read window label: %r");
-	path = smprint("/dev/wsys/%d/window", id);
+	w = arg;
+	path = smprint("/dev/wsys/%d/window", w->id);
 	fd = open(path, OREAD);
 	if(fd<0)
 		sysfatal("open: %r");
@@ -225,7 +239,7 @@ loadwin(int id)
 		in, iw, ih, iw*4,
 		out, ow, oh, ow*4,
 		4, 3, STBIR_FLAG_ALPHA_PREMULTIPLIED,
-		STBIR_EDGE_CLAMP, STBIR_FILTER_MITCHELL, STBIR_COLORSPACE_LINEAR,
+		STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT, STBIR_COLORSPACE_LINEAR,
 		NULL);
 	t = allocimage(display, sr, screen->chan, 0, DNofill);
 	if(t==nil)
@@ -235,7 +249,25 @@ loadwin(int id)
 	w->image = i;
 	free(in);
 	free(out);
+	sendul(w->c, 1);
+	threadexits(nil);
+}
+
+void
+loadwin(int id)
+{
+	Win *w;
+	char *path;
+
+	w = emalloc(sizeof *w);
 	addwin(w);
+	w->c = loadc;
+	w->id = id;
+	path = smprint("/dev/wsys/%d/label", id);
+	w->label = readstr(path);
+	free(path);
+	if(w->label==nil)
+		sysfatal("unable to read window label: %r");
 }
 
 void
@@ -260,7 +292,11 @@ loadwins(void)
 		if(wid==id)
 			continue;
 		loadwin(wid);
-	}	
+	}
+	/* start threads afterward so we are sure that nwins is final */
+	for(i=0; i<nwins; i++){
+		proccreate(loadthumbproc, wins[i], 4*1024);
+	}
 }
 
 void
@@ -271,13 +307,16 @@ threadmain(int argc, char *argv[])
 	Mouse m;
 	Rune k;
 	int n;
+	vlong t0, t1;
 	Alt alts[] = {
 		{ nil, &m,  CHANRCV },
 		{ nil, nil, CHANRCV },
 		{ nil, &k,  CHANRCV },
+		{ nil, nil, CHANRCV },
 		{ nil, nil, CHANEND },
 	};
 
+	nload = 0;
 	nwins = 0;
 	cur = 0;
 	loading = 1;
@@ -287,14 +326,18 @@ threadmain(int argc, char *argv[])
 		sysfatal("initmouse: %r");
 	if((kctl = initkeyboard(nil))==nil)
 		sysfatal("initkeyboard: %r");
+	if((loadc = chancreate(sizeof(ulong), 1))==nil)
+		sysfatal("chancreate: %r");
 	alts[Emouse].c = mctl->c;
 	alts[Eresize].c = mctl->resizec;
 	alts[Ekeyboard].c = kctl->c;
+	alts[Eload].c = loadc;
+	back = allocimagemix(display, DPalegreen, DWhite);
+	bord = allocimage(display, Rect(0,0,1,1), CMAP8, 1, DMedgreen);
 	memimageinit();
 	resize();
+	t0 = nsec();
 	loadwins();
-	loading = 0;
-	redraw();
 	for(;;){
 		switch(alt(alts)){
 		case Emouse:
@@ -333,9 +376,18 @@ threadmain(int argc, char *argv[])
 				break;
 			}
 			break;
+		case Eload:
+			++nload;
+			if(nload==nwins){
+				t1 = nsec();
+				loading = 0;
+			}
+			redraw();
+			break;
 		}
 	}
 End:
+	chanfree(loadc);
 	closemouse(mctl);
 	closekeyboard(kctl);
 	threadexitsall(nil);
