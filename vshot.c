@@ -46,6 +46,7 @@ Win		**wins;
 int		nwins;
 int		nload;
 int		cur;
+int		dump;
 
 void*
 emalloc(ulong size)
@@ -73,6 +74,10 @@ screenshot(void)
 	char buf[256] = {0};
 	int fd;
 	
+	if(dump){
+		writememimage(1, wins[cur]->image);
+		threadexitsall(nil);
+	}
 	if(enter("Save as", buf, sizeof buf, mctl, kctl, nil)<=0)
 		return;
 	fd = create(buf, OWRITE, 0644);
@@ -299,9 +304,19 @@ threadmain(int argc, char *argv[])
 		{ nil, nil, CHANEND },
 	};
 
+	dump  = 0;
 	nload = 0;
 	nwins = 0;
-	cur = 0;
+	cur   = 0;
+	ARGBEGIN{
+	case 'c':
+		dump = 1;
+		break;
+	default:
+		fprint(2, "usage: %s [-c]\n", argv0);
+		threadexitsall("usage");
+	}ARGEND
+
 	if(initdraw(nil, nil, "vshot")<0)
 		sysfatal("initdraw: %r");
 	unlockdisplay(display);
@@ -355,6 +370,9 @@ threadmain(int argc, char *argv[])
 				if(cur<0)
 					cur = nwins - 1;
 				redraw();
+				break;
+			case '\n':
+				screenshot();
 				break;
 			}
 			break;
