@@ -40,11 +40,8 @@ Menu   menu = { menustr };
 Mousectl 	*mctl;
 Keyboardctl	*kctl;
 Channel		*loadc;
-Rectangle	winr;
-Rectangle	shotr;
 Image		*back;
 Image		*bord;
-int		loading;
 Win		**wins;
 int		nwins;
 int		nload;
@@ -94,8 +91,10 @@ redraw(void)
 	int pc;
 	char *s;
 
+	lockdisplay(display);
 	draw(screen, screen->r, display->white, nil, ZP);
-	if(loading){
+	w = wins[cur];
+	if(w == nil || w->thumbnail == nil){
 		p.x = (Dx(screen->r)-200)/2;
 		p.y = (Dy(screen->r)-25)/2;
 		r = rectaddpt(rectaddpt(Rect(0, 0, 200, 25), p), screen->r.min);
@@ -109,35 +108,17 @@ redraw(void)
 			draw(screen, pr, back, nil, ZP);
 		}
 		border(screen, r, 2, bord, ZP);	
-		flushimage(display, 1);
-		return;
+	}else{
+		p.x = screen->r.min.x + (Dx(screen->r)-stringwidth(font, w->label))/2;
+		p.y = screen->r.max.y - 12 - font->height;
+		string(screen, p, display->black, ZP, font, w->label);
+		tp.x = (Dx(screen->r)-Dx(w->thumbnail->r))/2;
+		tp.y = (Dy(screen->r)-Dy(w->thumbnail->r))/2;
+		r = rectaddpt(rectaddpt(w->thumbnail->r, tp), screen->r.min);
+		draw(screen, r, w->thumbnail, nil, ZP);
 	}
-	w = wins[cur];
-	p.x = screen->r.min.x + (Dx(winr)-stringwidth(font, w->label))/2;
-	p.y = screen->r.max.y - 12 - font->height;
-	string(screen, p, display->black, ZP, font, w->label);
-	tp.x = (Dx(screen->r)-Dx(w->thumbnail->r))/2;
-	tp.y = (Dy(screen->r)-Dy(w->thumbnail->r))/2;
-	r = rectaddpt(rectaddpt(w->thumbnail->r, tp), screen->r.min);
-	draw(screen, r, w->thumbnail, nil, ZP);
 	flushimage(display, 1);
-}
-
-void
-resize(void)
-{
-	int fd, x, y;
-
-	winr  = Rect(0, 0, 800, 600);
-	shotr = Rect(0, 0, 600, 400);
-	fd = open("/dev/wctl", OWRITE);
-	if(fd<0)
-		sysfatal("open: %r");
-	x = (Dx(display->image->r)-Dx(winr))/2;
-	y = (Dy(display->image->r)-Dy(winr))/2;
-	fprint(fd, "resize -r %d %d %d %d\n", x, y, x+Dx(winr), y+Dy(winr));
-	close(fd);
-	redraw();
+	unlockdisplay(display);
 }
 
 char*
@@ -173,9 +154,7 @@ addwin(Win *w)
 {
 	int SINC = 32;
 
-	if(nwins==0)
-		wins = emalloc(SINC * sizeof *wins);
-	else if(nwins % SINC == 0)
+	if(nwins % SINC == 0)
 		wins = erealloc(wins, (nwins + SINC) * sizeof *wins);
 	wins[nwins++] = w;
 }
@@ -186,8 +165,8 @@ scaledrect(Rectangle r)
 	int mw, mh, w, h;
 	double a;
 
-	mw = Dx(shotr);
-	mh = Dy(shotr);
+	mw = Dx(screen->r)*3/4;
+	mh = Dy(screen->r)*3/4;
 	w = Dx(r);
 	h = Dy(r);
 	a = ((double)w)/h;
@@ -212,7 +191,7 @@ loadthumbproc(void *arg)
 	u8int *in, *out;
 	Rectangle sr;
 	int iw, ih, ow, oh;
-	int fd, n;
+	int fd, n, err;
 
 	w = arg;
 	path = smprint("/dev/wsys/%d/window", w->id);
@@ -226,30 +205,35 @@ loadthumbproc(void *arg)
 	close(fd);
 	iw = Dx(i->r);
 	ih = Dy(i->r);
+	sr = scaledrect(i->r);
+	ow = Dx(sr);
+	oh = Dy(sr);
 	n = iw*ih*4;
 	in = emalloc(n);
 	if(unloadmemimage(i, i->r, in, n)<0)
 		sysfatal("unloadmemimage: %r");
-	sr = scaledrect(i->r);
-	ow = Dx(sr);
-	oh = Dy(sr);
 	n = ow*oh*4;
 	out = emalloc(n);
-	stbir_resize_uint8_generic(
+	err = stbir_resize_uint8_generic(
 		in, iw, ih, iw*4,
 		out, ow, oh, ow*4,
-		4, 3, STBIR_FLAG_ALPHA_PREMULTIPLIED,
+		4, -1, 0,
 		STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT, STBIR_COLORSPACE_LINEAR,
 		NULL);
+	if(err != 1)
+		sysfatal("resize failed (window %d)", w->id);
+	lockdisplay(display);
 	t = allocimage(display, sr, screen->chan, 0, DNofill);
 	if(t==nil)
 		sysfatal("allocimage: %r");
-	loadimage(t, sr, out, ow*oh*4);
-	w->thumbnail = t;
-	w->image = i;
+	if(loadimage(t, sr, out, n) <= 0)
+		sysfatal("loadimage: %r");
 	free(in);
 	free(out);
+	w->thumbnail = t;
+	w->image = i;
 	sendul(w->c, 1);
+	unlockdisplay(display);
 	threadexits(nil);
 }
 
@@ -260,6 +244,7 @@ loadwin(int id)
 	char *path;
 
 	w = emalloc(sizeof *w);
+	w->thumbnail = nil;
 	addwin(w);
 	w->c = loadc;
 	w->id = id;
@@ -294,9 +279,8 @@ loadwins(void)
 		loadwin(wid);
 	}
 	/* start threads afterward so we are sure that nwins is final */
-	for(i=0; i<nwins; i++){
+	for(i=0; i<nwins; i++)
 		proccreate(loadthumbproc, wins[i], 4*1024);
-	}
 }
 
 void
@@ -307,7 +291,6 @@ threadmain(int argc, char *argv[])
 	Mouse m;
 	Rune k;
 	int n;
-	vlong t0, t1;
 	Alt alts[] = {
 		{ nil, &m,  CHANRCV },
 		{ nil, nil, CHANRCV },
@@ -319,9 +302,10 @@ threadmain(int argc, char *argv[])
 	nload = 0;
 	nwins = 0;
 	cur = 0;
-	loading = 1;
 	if(initdraw(nil, nil, "vshot")<0)
 		sysfatal("initdraw: %r");
+	unlockdisplay(display);
+	display->locking = 1;
 	if((mctl = initmouse(nil, screen))==nil)
 		sysfatal("initmouse: %r");
 	if((kctl = initkeyboard(nil))==nil)
@@ -335,8 +319,6 @@ threadmain(int argc, char *argv[])
 	back = allocimagemix(display, DPalegreen, DWhite);
 	bord = allocimage(display, Rect(0,0,1,1), CMAP8, 1, DMedgreen);
 	memimageinit();
-	resize();
-	t0 = nsec();
 	loadwins();
 	for(;;){
 		switch(alt(alts)){
@@ -355,7 +337,7 @@ threadmain(int argc, char *argv[])
 		case Eresize:
 			if(getwindow(display, Refnone)<0)
 				sysfatal("getwindow: %r");
-			resize();
+			redraw();
 			break;
 		case Ekeyboard:
 			switch(k){
@@ -378,17 +360,10 @@ threadmain(int argc, char *argv[])
 			break;
 		case Eload:
 			++nload;
-			if(nload==nwins){
-				t1 = nsec();
-				loading = 0;
-			}
 			redraw();
 			break;
 		}
 	}
 End:
-	chanfree(loadc);
-	closemouse(mctl);
-	closekeyboard(kctl);
 	threadexitsall(nil);
 }
