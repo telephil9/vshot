@@ -75,6 +75,8 @@ screenshot(void)
 	int fd;
 	
 	if(dump){
+		closemouse(mctl);
+		closekeyboard(kctl);
 		writememimage(1, wins[cur]->image);
 		threadexitsall(nil);
 	}
