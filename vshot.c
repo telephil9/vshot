@@ -186,22 +186,16 @@ scaledrect(Rectangle r)
 		w = floor(h*a);
 	}
 	return Rect(0, 0, w, h);
-}		
+}
 
-void
-loadthumbproc(void *arg)
+Memimage*
+winimage(int wid)
 {
-	Win *w;
+	Memimage *i, *o;
 	char *path;
-	Memimage *i;
-	Image *t;
-	u8int *in, *out;
-	Rectangle sr;
-	int iw, ih, ow, oh;
-	int fd, n, err;
-
-	w = arg;
-	path = smprint("/dev/wsys/%d/window", w->id);
+	int fd;
+	
+	path = smprint("/dev/wsys/%d/window", wid);
 	fd = open(path, OREAD);
 	if(fd<0)
 		sysfatal("open: %r");
@@ -210,6 +204,28 @@ loadthumbproc(void *arg)
 	if(i==nil)
 		sysfatal("readmemimage: %r");
 	close(fd);
+	if(i->nchan != 4){ /* convert to XRGB32 */
+		o = allocmemimage(i->r, XRGB32);
+		memimagedraw(o, o->r, i, i->r.min, nil, ZP, S);
+		freememimage(i);
+		i = o;
+	}
+	return i;
+}
+
+void
+loadthumbproc(void *arg)
+{
+	Win *w;
+	Memimage *i;
+	Image *t;
+	u8int *in, *out;
+	Rectangle sr;
+	int iw, ih, ow, oh;
+	int n, err;
+
+	w = arg;
+	i = winimage(w->id);
 	iw = Dx(i->r);
 	ih = Dy(i->r);
 	sr = scaledrect(i->r);
@@ -230,7 +246,7 @@ loadthumbproc(void *arg)
 	if(err != 1)
 		sysfatal("resize failed (window %d)", w->id);
 	lockdisplay(display);
-	t = allocimage(display, sr, screen->chan, 0, DNofill);
+	t = allocimage(display, sr, XRGB32, 0, DNofill);
 	if(t==nil)
 		sysfatal("allocimage: %r");
 	if(loadimage(t, sr, out, n) <= 0)
